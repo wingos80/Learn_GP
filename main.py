@@ -43,6 +43,9 @@ def plot_gp(GP: Tuple[Callable, jax.Array], dataset: Tuple[jax.Array, jax.Array]
     plt.fill_between(
         plot_domain, plot_values + std, plot_values - std, color="C0", alpha=0.1
     )
+    plt.grid()
+    plt.xlim(-5, 105)
+    plt.ylim(0, 2)
     plt.show()
 
 
@@ -84,7 +87,7 @@ def define_gp(
     return kernel_function, K_y
 
 
-# # Update the "trained" (ppl call it a-priori sometimes) GP with new data points
+## Update the "trained" (ppl call it a-priori sometimes) GP with new data points
 # def update_gp(post_domain: jax.Array, prior_domain: jax.Array, GP: Tuple[Callable, jax.Array]) -> Tuple[Callable, jax.Array]:
 #     """
 #     TODO, verify i can actually add new data pts?
@@ -174,30 +177,33 @@ def find_optimal_hyperparameter(
 def main():
     ## Single dimensional GP
     # The dataset
-    train_domain = jnp.array([-0.5, 0, 0.2, 0.8]).reshape(
+    train_domain = jnp.array([1, 100,]).reshape(
         -1, 1
     )  # column vector of observation locations
-    train_values = jnp.array([1, 2, 0.5, 0.9]).reshape(
+    train_values = jnp.array([1, 2,]).reshape(
         -1, 1
     )  # column vector of observations
     dataset = (train_domain, train_values)
-    new_domain = jnp.array([0.3, 0.4]).reshape(-1, 1)
-    new_values = jnp.array([0.55, 0.65]).reshape(-1, 1)
+    new_domain = jnp.array([0.2, 0.4, 44]).reshape(-1, 1)
+    new_values = jnp.array([0.31, 0.65, 1.2]).reshape(-1, 1)
     new_dataset = (new_domain, new_values)
 
-    L = find_optimal_hyperparameter(dataset=dataset, itrs=10, ub_lb=[0.01, 1])
-    kernel_function, K_y = define_gp(dataset, RBF_theta=0.25)
+    # first try to find the optimal length scale, L, for your RBF kernel
+    L = find_optimal_hyperparameter(dataset=dataset, itrs=10, ub_lb=[0.01, 100])
+    # then define a gaussian process over the prior with this L
+    kernel_function, K_y = define_gp(dataset, RBF_theta=L)
 
-    print("\n\nTrained one GP!\n\n")
+    print("\n\nTrained one GP, congrats!\n\n")
     plot_gp(GP=(kernel_function, K_y), dataset=dataset)
 
+    # now mix prior and posterior into one dataset
     posterior_data = (
         jnp.concatenate((dataset[0], new_dataset[0])),
         jnp.concatenate((dataset[1], new_dataset[1])),
     )
 
-    L = find_optimal_hyperparameter(dataset=posterior_data, ub_lb=[0.01, 1])
-    kernel_function, K_y = define_gp(posterior_data, RBF_theta=0.6)
+    # use the "pretrained" GP (we found an optimal L earlier) on this new mix of data called the "posterior"
+    kernel_function, K_y = define_gp(posterior_data, RBF_theta=L)
 
     print("\n\nTrained the GP again!\n\n")
     plot_gp(GP=(kernel_function, K_y), dataset=posterior_data)
