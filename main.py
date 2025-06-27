@@ -71,88 +71,105 @@ def define_gp(dataset: Tuple[jax.Array, jax.Array], RBF_theta:float) -> Tuple[Ca
     K_y = K  # (optional) incorporate noise here
     return kernel_function, K_y
 
-# Update the "trained" (ppl call it a-priori sometimes) GP with new data points
-def update_gp(new_data: Tuple[jax.Array, jax.Array], prior: Tuple[jax.Array, jax.Array], GP: Tuple[Callable, jax.Array]) -> Tuple[Callable, jax.Array]:
-    """
-    TODO, verify i can actually add new data pts?
-    newdata: 
-        tuple containing the new datapoint's loc and its' value
-        (1st & 2nd elem respectively).
-    GP: 
-        A Gassuian Process, defined by it's Kernel function and
-        the Covariance matrix (1st & 2nd elem of respectively).
-    """
-    prio_dom, prio_val = prior
-    nd_dom, nd_val = new_data
-    kernel_function, K = GP
+# # Update the "trained" (ppl call it a-priori sometimes) GP with new data points
+# def update_gp(post_domain: jax.Array, prior_domain: jax.Array, GP: Tuple[Callable, jax.Array]) -> Tuple[Callable, jax.Array]:
+#     """
+#     TODO, verify i can actually add new data pts?
+#     post_domain: 
+#         domain over which the "posterior" dataset is defined
+#     prior_domain:
+#         domain over which the "prior" GP's cov matrix is defined
+#     GP: 
+#         A Gassuian Process, defined by it's Kernel function and
+#         the Covariance matrix (1st & 2nd elem of respectively).
+#     """
+#     kernel_function, K = GP
 
-    # construct the new covariance vector k*
-    k_star: jax.Array = jnp.array(
-        [kernel_function(x_j, x_i) 
-         for x_i in nd_dom 
-         for x_j in prio_dom]
-    ).reshape(
-        len(nd_dom), len(prio_dom)
-    )  # double for loop in list comprehension, shape is latter then former
+#     # construct the new covariance vector k*
+#     k_star: jax.Array = jnp.array(
+#         [kernel_function(x_j, x_i) 
+#          for x_i in post_domain 
+#          for x_j in prior_domain]
+#     ).reshape(
+#         len(post_domain), len(prior_domain)
+#     )  # double for loop in list comprehension, shape is latter then former
 
-    # augment the prior cov matrix with k*
-    K_post_1 = jnp.concatenate((K, k_star), axis=0)  # first add k*, the posterior-information as new columns
-    k_star = jnp.append(k_star,jnp.zeros((len(nd_dom), len(nd_dom))),axis=0)  # new data has 0 noise
-    K_star = jnp.concatenate((K, k_star.T), axis=1)  # then add k* as new rows
+#     # augment the prior cov matrix with k*
+#     K_post_1 = jnp.concatenate((K, k_star), axis=0)  # first add k*, the posterior-information as new columns
+#     k_star = jnp.concatenate((k_star,jnp.zeros((len(post_domain), len(post_domain)))),axis=1)  # assume posterior has 0 noise
+#     K_post_2 = jnp.concatenate((K_post_1, k_star.T), axis=1)  # then add k* as new rows
 
-    posterior_GP = (kernel_function, K_star)
-    return posterior_GP
+#     posterior_GP = (kernel_function, K_post_2)
+#     return posterior_GP
 
 
 # Negative of a minimal version of the original log likelihood of a GP
 def negative_log_likelihood(K_y: jax.Array, train_values: jax.Array):
     return jnp.log(jnp.linalg.norm(K_y, ord='fro')) + train_values.T@jnp.linalg.inv(K_y)@train_values
 
+def determine_costs(dataset: Tuple[jax.Array, jax.Array], test_pts: List[float]) -> List[float]:
+    pt_costs = [1e9 for _ in test_pts]
+    for i, L in enumerate(test_pts):
+        _, K_y = define_gp(dataset, RBF_theta=L)
+        pt_costs[i] = negative_log_likelihood(K_y, dataset[1])
+
+    return pt_costs
+
 def main():
-    def determine_costs(test_pts: List[float]) -> List[float]:
-        pt_costs = [1e9 for _ in test_pts]
-        for i, L in enumerate(test_pts):
-            _, K_y = define_gp(dataset, RBF_theta=L)
-            pt_costs[i] = negative_log_likelihood(K_y, train_values)
-
-        return pt_costs
-
     ## Single dimensional GP
     # The dataset
     train_domain = jnp.array([-0.5, 0, 0.2, 0.8]).reshape(-1, 1)  # column vector of observation locations
     train_values = jnp.array([1, 2, 0.5, 0.9]).reshape(-1, 1)  # column vector of observations
     dataset = (train_domain, train_values)
+    new_domain = jnp.array([0.3, 0.4]).reshape(-1, 1)
+    new_values = jnp.array([0.55, 0.65]).reshape(-1, 1)
+    new_dataset = (new_domain, new_values)
+
+    def find_optimal_hyperparameter(dataset: Tuple[jax.Array, jax.Array], itrs : int = 10, ub_lb : List[float] = [0.25,0.75]) -> float:
+        # Optimizing hyperparameter for GP
+        bounds = ub_lb
+        bound_costs = determine_costs(dataset, bounds)
+        # Iteratively update the length scale (GP's hyperparameter)
+        for itr in range(itrs):
+            print(f"---------{itr=}---------")
+
+            step = (bounds[1] - bounds[0])/3
+            # test_pts = [step + bounds[0] for _ in range(3)]
+            test_pts = [bounds[0] + step, (bounds[1] - bounds[0])/2, bounds[1] - step]
+
+            costs = determine_costs(dataset, test_pts)
+
+            L, L_cost = test_pts[1], costs[1]
+            print(f"log(p) of L={L}: {L_cost}")
+            if L_cost == min(bound_costs):
+                print(f"optimal hyperparameter found, terminating search")
+                print(f"---------Bisection Terminated---------")
+                break
+            if L_cost > min(bound_costs):
+                bounds[0], bounds[1] = test_pts[0], test_pts[2]
+                print(f"optimal hyperparameter within bounds, shrinking search")
+                continue
+            else:
+                print(f"optimal hyperparameter not within bounds, expanding search")
+                bounds[0] -= step*2
+                bounds[1] += step*2
+
+        return L
     
-    # The GP
-    itrs = 10
-    bounds = [0.25, 0.75]
-    bound_costs = determine_costs(bounds)
-    # Iteratively update the length scale (GP's hyperparameter)
-    for itr in range(itrs):
-        print(f"---------{itr=}---------")
 
-        step = (bounds[1] - bounds[0])/3
-        # test_pts = [step + bounds[0] for _ in range(3)]
-        test_pts = [bounds[0] + step, (bounds[1] - bounds[0])/2, bounds[1] - step]
-
-        costs = determine_costs(test_pts)
-
-        L, L_cost = test_pts[1], costs[1]
-        print(f"log(p) of L={L}: {L_cost}")
-        if L_cost == min(bound_costs):
-            print(f"optimal hyperparameter found, terminating search")
-            break
-        if L_cost > min(bound_costs):
-            bounds[0], bounds[1] = test_pts[0], test_pts[2]
-            print(f"optimal hyperparameter within bounds, shrinking search")
-            continue
-        else:
-            print(f"optimal hyperparameter not within bounds, expanding search")
-            bounds[0] -= step*2
-            bounds[1] += step*2
-            
+    L = find_optimal_hyperparameter(dataset=dataset,itrs=10,ub_lb=[0.01, 1])
     kernel_function, K_y = define_gp(dataset, RBF_theta=L)
+    
+    print("\n\nTrained one GP!\n\n")
     plot_gp(GP=(kernel_function, K_y), dataset=dataset)
+
+    posterior_data = (jnp.concatenate((dataset[0], new_dataset[0])), 
+                      jnp.concatenate((dataset[1], new_dataset[1])),)
+    L = find_optimal_hyperparameter(dataset=posterior_data,ub_lb=[0.01, 1])
+    kernel_function, K_y = define_gp(posterior_data, RBF_theta=L)
+
+    print("\n\nTrained the GP again!\n\n")
+    plot_gp(GP=(kernel_function, K_y), dataset=posterior_data)
 
     
 
