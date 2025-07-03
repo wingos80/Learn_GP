@@ -1,216 +1,99 @@
-import time
+import numpy as np
+import matplotlib.pyplot as plt
 
-timer = time.perf_counter_ns
-
-start = timer()
-import logging
-from typing import Tuple, List
-from collections.abc import Callable
-import jax, jax.numpy as jnp
-
-logger = logging.getLogger(__name__)
-
-
-# visualize cov matrix for verification
-def visualize_cov(domain, K):
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots()
-    pcm = ax.pcolor(domain.flatten(), jnp.flip(domain.flatten()), K)
-    cbar = fig.colorbar(pcm, ax=ax, extend="max")
-    plt.show()
-
-
-# Plot the GP
-def plot_gp(GP: Tuple[Callable, jax.Array], dataset: Tuple[jax.Array, jax.Array]):
-    kernel, K_y = GP[0], GP[1]
-    K_y_inv = jnp.linalg.inv(K_y)
-
-    # evaluating the gp
-    plot_domain = jnp.linspace(-0.7, 1, 403)
-    gp_evaluated = jnp.array(
-        [
-            evaluate_gp(x_star, kernel, K_y_inv=K_y_inv, dataset=dataset)
-            for x_star in plot_domain
-        ]
-    )
-    plot_values = gp_evaluated[:, 0]
-    std = gp_evaluated[:, 1]
-
-    import matplotlib.pyplot as plt
-
-    plt.plot(plot_domain, plot_values)
-    plt.fill_between(
-        plot_domain, plot_values + std, plot_values - std, color="C0", alpha=0.1
-    )
-    plt.grid()
-    plt.xlim(-5, 105)
-    plt.ylim(0, 2)
-    plt.show()
-
-
-# evaluate a Gaussian Process at the point x_star, given the GP's K inverse K_y_inv, and the pre-existing dataset x,y
-def evaluate_gp(
-    x_star: float,
-    kernel: Callable,
-    K_y_inv: Callable,
-    dataset: Tuple[jax.Array, jax.Array],
-) -> jax.Array:
-    domain, values = dataset[0], dataset[1]
-
-    k_star_row = jnp.array([kernel(x_star, x_j) for x_j in domain]).reshape(
-        1, -1
-    )  # create a row vector k*
-    k_star_K_inv = k_star_row @ K_y_inv
-
-    evaluant = (k_star_K_inv @ values)[0, 0]
-    var = kernel(x_star, x_star) - k_star_K_inv @ k_star_row.T
-    return jnp.array([evaluant, jnp.sqrt(var[0, 0])])
-
-
-# Parameterize the GP
-def define_gp(
-    dataset: Tuple[jax.Array, jax.Array], RBF_theta: float
-) -> Tuple[Callable, jax.Array]:
-    train_domain = dataset[0]
-
-    # mu = jnp.zeros_like(train_domain)  # IMO not neccessary to parameterize a GP
-    kernel_function: Callable = lambda x_i, x_j: jnp.exp(
-        -jnp.linalg.norm(x_i - x_j) / (2 * RBF_theta**2)
-    )  # RBF
-    K: jax.Array = jnp.array(
-        [kernel_function(x_j, x_i) for x_i in train_domain for x_j in train_domain]
-    ).reshape(
-        len(train_domain), -1
-    )  # covariance function, TODO refactor away double list comprehension
-    K_y = K  # (optional) incorporate noise here
-    return kernel_function, K_y
-
-
-## Update the "trained" (ppl call it a-priori sometimes) GP with new data points
-# def update_gp(post_domain: jax.Array, prior_domain: jax.Array, GP: Tuple[Callable, jax.Array]) -> Tuple[Callable, jax.Array]:
-#     """
-#     TODO, verify i can actually add new data pts?
-#     post_domain:
-#         domain over which the "posterior" dataset is defined
-#     prior_domain:
-#         domain over which the "prior" GP's cov matrix is defined
-#     GP:
-#         A Gassuian Process, defined by it's Kernel function and
-#         the Covariance matrix (1st & 2nd elem of respectively).
-#     """
-#     kernel_function, K = GP
-
-#     # construct the new covariance vector k*
-#     k_star: jax.Array = jnp.array(
-#         [kernel_function(x_j, x_i)
-#          for x_i in post_domain
-#          for x_j in prior_domain]
-#     ).reshape(
-#         len(post_domain), len(prior_domain)
-#     )  # double for loop in list comprehension, shape is latter then former
-
-#     # augment the prior cov matrix with k*
-#     K_post_1 = jnp.concatenate((K, k_star), axis=0)  # first add k*, the posterior-information as new columns
-#     k_star = jnp.concatenate((k_star,jnp.zeros((len(post_domain), len(post_domain)))),axis=1)  # assume posterior has 0 noise
-#     K_post_2 = jnp.concatenate((K_post_1, k_star.T), axis=1)  # then add k* as new rows
-
-#     posterior_GP = (kernel_function, K_post_2)
-#     return posterior_GP
-
-
-# Negative of a minimal version of the original log likelihood of a GP
-def negative_log_likelihood(K_y: jax.Array, train_values: jax.Array):
-    return (
-        jnp.log(jnp.linalg.norm(K_y, ord="fro"))
-        + train_values.T @ jnp.linalg.inv(K_y) @ train_values
-    )
-
-
-def determine_costs(
-    dataset: Tuple[jax.Array, jax.Array], test_pts: List[float]
-) -> List[float]:
-    pt_costs = [1e9 for _ in test_pts]
-    for i, L in enumerate(test_pts):
-        _, K_y = define_gp(dataset, RBF_theta=L)
-        pt_costs[i] = negative_log_likelihood(K_y, dataset[1])
-
-    return pt_costs
-
-
-def find_optimal_hyperparameter(
-    dataset: Tuple[jax.Array, jax.Array],
-    itrs: int = 10,
-    ub_lb: List[float] = [0.25, 0.75],
-) -> float:
-    # Optimizing hyperparameter for GP
-    bounds = ub_lb
-    bound_costs = determine_costs(dataset, bounds)
-    # Iteratively update the length scale (GP's hyperparameter)
-    for itr in range(itrs):
-        print(f"---------{itr=}---------")
-
-        step = (bounds[1] - bounds[0]) / 3
-        # test_pts = [step + bounds[0] for _ in range(3)]
-        test_pts = [bounds[0] + step, (bounds[1] - bounds[0]) / 2, bounds[1] - step]
-
-        costs = determine_costs(dataset, test_pts)
-
-        L, L_cost = test_pts[1], costs[1]
-        print(f"log(p) of L={L}: {L_cost}")
-        if L_cost == min(bound_costs):
-            print(f"optimal hyperparameter found, terminating search")
-            print(f"---------Bisection Terminated---------")
-            break
-        if L_cost > min(bound_costs):
-            bounds[0], bounds[1] = test_pts[0], test_pts[2]
-            print(f"optimal hyperparameter within bounds, shrinking search")
-            continue
+class GaussianProcess:
+    def __init__(self, kernel_func, noise=1e-5, mean_prior=0):
+        """Initialize GP with kernel function, noise level, and mean prior"""
+        self.kernel_func = kernel_func
+        self.noise = noise
+        self.mean_prior = mean_prior
+        self.X_train = None
+        self.y_train = None
+        self.K_inv = None
+    
+    def update(self, X_new, y_new):
+        """Add new data points to the GP"""
+        X_new = np.array(X_new).reshape(-1, 1)
+        y_new = np.array(y_new).reshape(-1, 1) - self.mean_prior
+        
+        if self.X_train is None:
+            self.X_train = X_new
+            self.y_train = y_new
         else:
-            print(f"optimal hyperparameter not within bounds, expanding search")
-            bounds[0] -= step * 2
-            bounds[1] += step * 2
+            self.X_train = np.vstack([self.X_train, X_new])
+            self.y_train = np.vstack([self.y_train, y_new])
+        
+        # Update inverse kernel matrix efficiently (would be better with rank-1 update)
+        self.K_inv = None
+    
+    def _compute_kernel_inverse(self):
+        """Compute inverse of kernel matrix with noise"""
+        K = self.kernel_func(self.X_train, self.X_train)
+        self.K_inv = np.linalg.inv(K + self.noise * np.eye(len(self.X_train)))
+    
+    def predict(self, X_test):
+        """Make predictions at new test points"""
+        X_test = np.array(X_test).reshape(-1, 1)
+        
+        if self.X_train is None:
+            # Prior if no data
+            mean = np.zeros(len(X_test)) + self.mean_prior
+            cov = self.kernel_func(X_test, X_test)
+            return mean, np.diag(cov)
+        
+        if self.K_inv is None:
+            self._compute_kernel_inverse()
+        
+        # Compute kernel matrices
+        K_s = self.kernel_func(self.X_train, X_test)
+        K_ss = self.kernel_func(X_test, X_test)
+        
+        # Compute predictive mean and covariance
+        mean = self.mean_prior + K_s.T @ self.K_inv @ self.y_train
+        cov = K_ss - K_s.T @ self.K_inv @ K_s
+        
+        return mean.flatten(), np.diag(cov)
+    
+    def plot(self, X_test=None):
+        """Plot the GP with training data and uncertainty"""
+        if X_test is None:
+            X_test = np.linspace(np.min(self.X_train)-1, np.max(self.X_train)+1, 100)
+        
+        mean, var = self.predict(X_test)
+        std = np.sqrt(var)
+        
+        plt.figure(figsize=(10, 6))
+        if self.X_train is not None:
+            plt.plot(self.X_train, self.y_train + self.mean_prior, 'k*', markersize=10, label='Data')
+        plt.plot(X_test, mean, 'b-', label='Mean prediction')
+        plt.fill_between(X_test, mean-2*std, mean+2*std, alpha=0.2, color='blue', label='95% CI')
+        plt.xlabel('Input')
+        plt.ylabel('Output')
+        plt.legend()
+        plt.show()
 
-    return L
-
-
-def main():
-    ## Single dimensional GP
-    # The dataset
-    train_domain = jnp.array([1, 100,]).reshape(
-        -1, 1
-    )  # column vector of observation locations
-    train_values = jnp.array([1, 2,]).reshape(
-        -1, 1
-    )  # column vector of observations
-    dataset = (train_domain, train_values)
-    new_domain = jnp.array([0.2, 0.4, 44]).reshape(-1, 1)
-    new_values = jnp.array([0.31, 0.65, 1.2]).reshape(-1, 1)
-    new_dataset = (new_domain, new_values)
-
-    # first try to find the optimal length scale, L, for your RBF kernel
-    L = find_optimal_hyperparameter(dataset=dataset, itrs=10, ub_lb=[0.01, 100])
-    # then define a gaussian process over the prior with this L
-    kernel_function, K_y = define_gp(dataset, RBF_theta=L)
-
-    print("\n\nTrained one GP, congrats!\n\n")
-    plot_gp(GP=(kernel_function, K_y), dataset=dataset)
-
-    # now mix prior and posterior into one dataset
-    posterior_data = (
-        jnp.concatenate((dataset[0], new_dataset[0])),
-        jnp.concatenate((dataset[1], new_dataset[1])),
-    )
-
-    # use the "pretrained" GP (we found an optimal L earlier) on this new mix of data called the "posterior"
-    kernel_function, K_y = define_gp(posterior_data, RBF_theta=L)
-
-    print("\n\nTrained the GP again!\n\n")
-    plot_gp(GP=(kernel_function, K_y), dataset=posterior_data)
-
-
+# Example usage:
 if __name__ == "__main__":
-    print(f"Starting GP script*_-+_*_...._8___")
-    main()
-    end = timer()
-    print(f"time: {(end-start)/1e9} s")
+    # Define a simple RBF kernel
+    def rbf_kernel(X1, X2, length_scale=1.0, sigma_f=1.0):
+        sqdist = np.sum(X1**2, 1).reshape(-1, 1) + np.sum(X2**2, 1) - 2 * np.dot(X1, X2.T)
+        return sigma_f**2 * np.exp(-0.5 / length_scale**2 * sqdist)
+    
+    # Create GP with mean prior of 0.5
+    gp = GaussianProcess(lambda x1, x2: rbf_kernel(x1, x2, 1.0, 1.0), mean_prior=0.5)
+    
+    # Initial data
+    X_data = np.array([1, 3, 5])
+    y_data = np.array([1.2, 0.5, 1.8])
+    gp.update(X_data, y_data)
+    gp.plot()
+    
+    # Add new data point
+    print("\nAdding new data point at x=4, y=1.5")
+    gp.update(4, 1.5)
+    gp.plot()
+    
+    # Add another data point
+    print("\nAdding new data point at x=2, y=0.8")
+    gp.update(2, 0.8)
+    gp.plot()
